@@ -6,11 +6,10 @@ output:
   pdf_document: default
 ---
 
-Hier werden alle notwendigen Codes für die Abgabe der zweiten Übung dokumentiert. 
-Gruppenmitglieder 
-- Bachmann, Karen Leonie 2771376
-- Garcia, Yannik 2769763
-- Loor, Christian 2743965
+Autoren:
+- Bachmann, Karen Leonie
+- Garcia, Yannik 
+- Loor, Christian 
 
 ```{r}
 print("Welche Faktoren haben die höchste Bedeutung auf die Entwicklung der Corona-Infektionsrate?")
