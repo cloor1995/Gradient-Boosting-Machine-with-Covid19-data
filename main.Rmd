@@ -1,0 +1,1036 @@
+---
+title: "WiSe2022_Data_Analytics_Übung2"
+output:
+  html_notebook: default
+  word_document: default
+  pdf_document: default
+---
+
+Hier werden alle notwendigen Codes für die Abgabe der zweiten Übung dokumentiert. 
+Gruppenmitglieder 
+- Bachmann, Karen Leonie 2771376
+- Garcia, Yannik 2769763
+- Loor, Christian 2743965
+
+```{r}
+print("Welche Faktoren haben die höchste Bedeutung auf die Entwicklung der Corona-Infektionsrate?")
+print("Welchen Stellenwert nimmt dabei Social-Distancing ein?")
+```
+
+*Set-up*
+Hier werden alle notwendigen Libraies geladen. 
+Anschließend wird der der Datensatz hier eingefügt.
+
+```{r}
+library(caret)
+library(corrplot)
+library(cowplot)
+library(data.table)
+library(dplyr)
+library(gbm)
+library(ggplot2)
+library(hrbrthemes)
+library(knitr)
+library(lubridate)
+library(psych)
+library(randomForest)
+library(readr)
+library(skimr)
+library(tidyr)
+library(tidyverse)
+library(viridis)
+library(vtable)
+library(xgboost)
+
+pacman::p_load(tidyverse, skimr, GGally, plotly, viridis, caret, randomForest, e1071, rpart, xgboost, h2o, corrplot, rpart.plot, corrgram, lightgbm, visNetwork)
+```
+Lade den Originaldatensatz lokal ins Notebook:
+```{r}
+US_counties_COVID19_health_weather_data <- read.csv("US_counties_COVID19_health_weather_data.csv") #dont forget to specify your wd 
+```
+```{r echo = FALSE, results= 'asis'}
+US_counties_COVID19_health_weather_data %>% skim() %>% kable()
+```
+Berechne Anteil der NA pro Variable
+```{r}
+tabulate_missing_values <- function(mydata, myhead){
+        
+        data_source = character(length(colnames(mydata)))
+        output <- data.frame(
+                var_name = factor(colnames(mydata)),
+                count_miss = colSums(is.na(mydata)),
+                percent_miss = colSums(is.na(mydata))/nrow(mydata)*100,
+                data_source = data_source,
+                row.names = NULL
+                ) %>%
+                arrange(data_source, desc(percent_miss)) %>%
+                mutate(var_num = 1:nrow(.))
+        # output <- df_miss %>% 
+        #                 arrange(desc(percent_miss)) %>% 
+        #                 select(var_name, percent_miss) %>% 
+        #                 head(myhead) %>%
+        #                 kable(digits=1)
+        return (output)
+}
+
+missing_original_data <- tabulate_missing_values(US_counties_COVID19_health_weather_data, 50)
+```
+```{r}
+plot_missing_values <- function(mydata){
+        return(mydata %>% 
+                ggplot(aes(x=var_num, y=percent_miss, fill =
+                                   data_source)) +
+                geom_bar(stat="identity") +
+                scale_y_continuous(limits=c(0, 100), expand = c(0, 0)) +
+                ylab("Percent data missing") + 
+                theme(axis.text.x = element_blank(),
+                      axis.ticks.x = element_blank())
+               )
+        }
+plot_missing_values(missing_original_data)
+```
+```{r}
+skim(US_counties_COVID19_health_weather_data)
+```
+Je nach Variable gibt es sehr viele NA-Values. Daher werden die interessanten Variablen im Voraus gewählt und anschließend weiter vorbereitet. Es sind NA vorhanden. Diese sollen im nächsten Schritt bereinigt werden.  Außerdem müssen die Daten in die richtigen Formate konventiert werden. Wählt nun alle relevanten Variablen aus. Dazu muss der Spaltenname der gewünschten Variable per Hand eingetragen werden. Anschließend werden die Daten konvertiert. 
+```{r}
+# Choose here all relevant variables for further analysis
+set.seed(42)
+choose_columns <- US_counties_COVID19_health_weather_data[,c(
+    #ny times/covid-19-data
+    "date",
+    "total_population",
+    "area_sqmi",
+    "population_density_per_sqmi",
+    "cases",
+    "deaths",
+    #geographic data
+    "fips",
+    "state",
+    "county",
+    "lat",
+    "lon",
+    # "percent_vaccinated", #Grippeimpfungen 2019, keine Corona-Impfungen
+    # dataset from the Kaiser Family Foundation
+    "stay_at_home_announced",
+    "stay_at_home_effective",
+    "date_stay_at_home_announced",
+    "date_stay_at_home_effective",
+    #weather data
+    "mean_temp",
+    "dewpoint",
+    # health from www.countyhealthrankings.org. All data are extracted from 2019
+    # Length of Life
+    "life_expectancy",
+    "years_of_potential_life_lost_rate",
+    "age_adjusted_death_rate",
+    # Quality of Life
+    "percent_fair_or_poor_health",
+    "percent_low_birthweight",
+    "average_number_of_physically_unhealthy_days",
+    "percent_adults_with_diabetes",
+    "num_hiv_cases",
+    # Health Behaviors
+    "percent_adults_with_obesity",
+    "food_environment_index",
+    "num_food_insecure",
+    "percent_excessive_drinking",
+    #Clinical Care
+    "percent_uninsured",
+    "num_primary_care_physicians",
+    "preventable_hospitalization_rate",
+    # socio econmic data as US CDC Social Vulnerability Index (SVI)
+     "percentile_rank_social_vulnerability", 
+     # Socioeconomic
+    "percentile_rank_socioeconomic_theme",
+    "percentile_rank_below_poverty",      
+    "percentile_rank_unemployed",                 
+    "percentile_rank_per_capita_income",
+    "percentile_rank_no_highschool_diploma",
+    # Household Composition & Disability
+    "percentile_rank_household_comp_disability_theme",
+    "percentile_rank_age_65_and_older",    
+    "percentile_rank_age_17_and_younger",        
+    "percentile_rank_disabled",            
+    "percentile_rank_single_parent_households", 
+    # Minority Status & Language
+    "percentile_rank_minority_status_and_language_theme",
+    "percentile_rank_minorities",                
+    "percentile_rank_limited_english_abilities", 
+    # Housing Type & Transportation
+    "percentile_rank_housing_and_transportation",
+    "percentile_rank_multi_unit_housing",       
+    "percentile_rank_mobile_homes",             
+    "percentile_rank_overcrowding",             
+    "percentile_rank_no_vehicle",               
+    "percentile_rank_institutionalized_in_group_quarters"
+        )
+]
+```
+```{r}
+# Create Function for auto-cleaning and auto-converting the data. Three columns are added(see below)
+generate_sampling <- function(data = choose_columns, sample = TRUE, n){
+        if(sample)
+        {
+                data[data == "NA"] <- NA  #NA are tracked as string 
+        data <- data %>% drop_na() # Delete all rows with NA values
+        data <- sample_n(data, n) # Select a random sample of 2000 row
+        
+        #convert yes&no to 1&0
+        data$D_stay_at_home_announced<-ifelse(data$stay_at_home_announced=="yes",1,0)
+        data$D_stay_at_home_effective<-ifelse(data$stay_at_home_effective=="yes",1,0)
+        #clean negative date values for effective social distancing
+        
+        #convert columns in correct data-format 
+        sampling <- data %>% 
+                mutate_all(type.convert, as.is=TRUE)%>% 
+                mutate(date = as.Date(date))%>%
+                mutate(date_stay_at_home_announced = as.Date(date_stay_at_home_announced))%>%
+                mutate(date_stay_at_home_effective = as.Date(date_stay_at_home_effective))%>%
+                mutate(mean_temp = (mean_temp - 32) * (5/9)) #convert to celcius
+                
+        # days since stayhome        
+        sampling$days_stay_at_home_effective <- as.numeric(difftime(sampling$date ,sampling$date_stay_at_home_effective , units = "days")) #negative values calculated. stay_at_home is announced in forward which results, that there are negative differences within the dataset. Dropping the negative results values is not an good option! 
+        
+        #cases_ratio per population in percent 
+                sampling$ratiocases <- (sampling$cases / sampling$total_population)
+        #generate column with logarithmic cases for further analysis
+        return(sampling)
+                
+        }
+  else
+    {
+                data[data == "NA"] <- NA  #NA are tracked as string 
+        data <- data %>% drop_na() # Delete all rows with NA values
+        
+        #convert yes&no to 1&0
+        data$D_stay_at_home_announced<-ifelse(data$stay_at_home_announced=="yes",1,0)
+        data$D_stay_at_home_effective<-ifelse(data$stay_at_home_effective=="yes",1,0)
+      
+
+        
+        #convert columns in correct data-format 
+        sampling <- data %>% 
+                mutate_all(type.convert, as.is=TRUE)%>% 
+                mutate(date = as.Date(date))%>%
+                mutate(date_stay_at_home_announced = as.Date(date_stay_at_home_announced))%>%
+                mutate(date_stay_at_home_effective = as.Date(date_stay_at_home_effective))%>%
+                mutate(mean_temp = (mean_temp - 32) * (5/9)) #convert to celcius
+                
+        # days since stayhome        
+        sampling$days_stay_at_home_effective <- as.numeric(difftime(sampling$date ,sampling$date_stay_at_home_effective , units = "days")) #negative values calculated. stay_at_home is announced in forward which results, that there are negative differences within the dataset. Dropping the negative results values is not an good option! 
+        
+        #cases_ratio per population in percent 
+                sampling$ratiocases <- (sampling$cases / sampling$total_population)
+        #generate column with logarithmic cases for further analysis
+        return(sampling)
+        }
+        
+        
+}
+
+dataset <- generate_sampling(choose_columns, FALSE, 10000) #pick the total population. Last argument will be ignored  
+
+dataset[,"days_stay_at_home_effective" < 0] <- 0
+
+
+
+write.csv(
+        dataset,
+        "C:\\Users\\Lenovo\\PycharmProjects\\DataAnalytics\\uebung2\\dataset.csv",
+        row.names = FALSE)
+
+```
+Prüfe Output der Konventierung
+```{r}
+plot_missing_values(tabulate_missing_values(dataset,50))
+```
+Ergebnis: Alle Nan wurden erfolgreich entfernt.
+```{r echo = FALSE, results= 'asis'}
+dataset %>% skim() %>% kable()
+```
+Nun wird ein Boxplot per Staat erstellt um herauszufinden, inwiefern die Daten von Außreißern betroffen ist. Dazu werden die Daten einer z-Transformation unterzogen. Sollten zu viele Outlier vorkommen, sollten die Daten mit dem Median anstelle des Mittelwertes aggregiert werden:
+```{r}
+
+dataset_z_transformed <- dataset  %>%
+        select(
+    "cases",
+    "deaths",
+    #geographic data
+    "state",
+    # "percent_vaccinated", #Grippeimpfungen 2019, keine Corona-Impfungen
+    # dataset from the Kaiser Family Foundation
+    "D_stay_at_home_effective") %>%
+    #weather data
+    # health from www.countyhealthrankings.org. All data are extracted from 2019
+    # Length of Life
+        mutate_at(c(
+            "cases",
+    "deaths",
+    "D_stay_at_home_effective"),
+                  scale)
+        
+
+# sample size
+sample_size = dataset_z_transformed %>%
+        group_by(state) %>%
+        summarize(Count_n=n())
+
+ggplot(dataset_z_transformed, aes(x=dataset_z_transformed$state, y=dataset_z_transformed$cases)) + 
+    geom_boxplot(
+            varwidth = TRUE,
+        
+                # custom boxes
+                color="blue",
+                fill="blue",
+                alpha=0.2,
+                
+                # Notch?
+                notch=TRUE,
+                notchwidth = 0.8,
+                
+                # custom outliers
+                outlier.colour="red",
+                outlier.fill="red",
+                outlier.size=3
+    
+    )
+
+```
+Das Ergebnis zeigt, dass trotz Standatisierung starke Ausßreißer zu beobachten sind. Somit sollte für die Aggregation mit dem Median gearbeitet werden. Nach dem Cleaning-Prozess sind noch 1675 Fips, 1133 counties und 39 Staaten verfügbar.
+```{r}
+aggregate_data <- function(data, my_groups ){
+    if (my_groups == "state"){
+        data_aggregated <- data %>%
+                group_by(state) %>% #aggegrate by target variable
+                dplyr::summarize(
+                    #ny times/covid-19-data
+                        #cases
+                        median_cases = median(cases),
+                        #ratiocases
+                        median_ratiocases  = median(ratiocases),
+                        #population
+                        median_total_population = median(total_population),
+                        #population_density_per_sqmi
+                        median_population_density = median(population_density_per_sqmi),
+                        #deaths
+                        median_deaths = median(deaths),
+                        # dataset from the Kaiser Family Foundation
+                        #stayhome in percentage
+                        mean_D_stay_at_home_effective = mean(D_stay_at_home_effective), #median variable not effective because it's an Dummy
+                        #stayhome duration
+                        median_days_stay_at_home_effective = median(days_stay_at_home_effective),
+                        #weather data 
+                        #temperature
+                        median_mean_temp = median(mean_temp),
+                        #dewpoint
+                        median_dewpoint= median(dewpoint),
+                        # health from www.countyhealthrankings.org. All data are extracted from 2019
+                        # Length of Life
+                        median_life_expectancy = median(life_expectancy),
+                        median_years_of_potential_life_lost_rate = median(years_of_potential_life_lost_rate),
+                        median_age_adjusted_death_rate= median(age_adjusted_death_rate),
+                        # Quality of Life
+                        median_percent_fair_or_poor_health= median(percent_fair_or_poor_health),
+                        median_percent_low_birthweight = median(percent_low_birthweight),
+                        median_average_number_of_physically_unhealthy_days= median(average_number_of_physically_unhealthy_days),
+                        median_percent_adults_with_diabetes= median(percent_adults_with_diabetes),
+                       median_num_hiv_cases = median(num_hiv_cases),
+                    # Health Behaviors
+                    median_percent_adults_with_obesity = median(percent_adults_with_obesity),
+                    median_food_environment_index = median(food_environment_index),
+                    median_num_food_insecure = median(num_food_insecure),
+                    median_percent_excessive_drinking = median(percent_excessive_drinking),
+                    #Clinical Care
+                    median_percent_uninsured = median(percent_uninsured),
+                    median_num_primary_care_physicians = median(num_primary_care_physicians),
+                    median_preventable_hospitalization_rate = median(preventable_hospitalization_rate),
+                    # socio econmic data as US CDC Social Vulnerability Index (SVI)
+                    median_percentile_rank_social_vulnerability = median(percentile_rank_social_vulnerability),
+                    # Socioeconomic
+                    median_percentile_rank_socioeconomic_theme = median(percentile_rank_socioeconomic_theme),
+                    median_percentile_rank_below_poverty = median(percentile_rank_below_poverty),
+                    median_percentile_rank_unemployed = median(percentile_rank_unemployed),
+                    median_percentile_rank_per_capita_income = median(percentile_rank_per_capita_income),
+                    median_percentile_rank_no_highschool_diploma= median(percentile_rank_no_highschool_diploma),
+                    # Household Composition & Disability
+                    median_percentile_rank_household_comp_disability_theme = median(percentile_rank_household_comp_disability_theme),
+                    median_percentile_rank_age_65_and_older = median(percentile_rank_age_65_and_older),
+                    median_percentile_rank_age_17_and_younger= median(percentile_rank_age_17_and_younger),
+                    median_percentile_rank_disabled= median(percentile_rank_disabled),
+                    median_percentile_rank_single_parent_households= median(percentile_rank_single_parent_households),
+                    # Minority Status & Language
+                    median_percentile_rank_minority_status_and_language_theme= median(percentile_rank_minority_status_and_language_theme),
+                    median_percentile_rank_minorities = median(percentile_rank_minorities),
+                    median_percentile_rank_limited_english_abilities = median(percentile_rank_limited_english_abilities),
+                    # Housing Type & Transportation
+                    median_percentile_rank_housing_and_transportation = median(percentile_rank_housing_and_transportation),
+                    median_percentile_percentile_rank_multi_unit_housing = median(percentile_rank_multi_unit_housing),
+                    median_percentile_rank_mobile_homes = median(percentile_rank_mobile_homes),
+                    median_percentile_rank_overcrowding = median(percentile_rank_overcrowding),
+                    median_percentile_rank_no_vehicle = median(percentile_rank_no_vehicle),
+                    median_percentile_rank_institutionalized_in_group_quarters = median(percentile_rank_institutionalized_in_group_quarters),
+                    ) %>%
+                as.data.frame()
+        return(data_aggregated) 
+    } else if (my_groups == "county"){
+        data_aggregated <- data %>%
+                group_by(county) %>% #aggegrate by target variable
+               dplyr::summarize(
+                    #ny times/covid-19-data
+                        #cases
+                        median_cases = median(cases),
+                        #ratiocases
+                        median_ratiocases  = median(ratiocases),
+                        #population
+                        median_total_population = median(total_population),
+                        #population_density_per_sqmi
+                        median_population_density = median(population_density_per_sqmi),
+                        #deaths
+                        median_deaths = median(deaths),
+                        # dataset from the Kaiser Family Foundation
+                        #stayhome in percentage
+                        mean_D_stay_at_home_effective = mean(D_stay_at_home_effective), #median variable not effective because it's an Dummy
+                        #stayhome duration
+                        median_days_stay_at_home_effective = median(days_stay_at_home_effective),
+                        #weather data 
+                        #temperature
+                        median_mean_temp = median(mean_temp),
+                        #dewpoint
+                        median_dewpoint= median(dewpoint),
+                        # health from www.countyhealthrankings.org. All data are extracted from 2019
+                        # Length of Life
+                        median_life_expectancy = median(life_expectancy),
+                        median_years_of_potential_life_lost_rate = median(years_of_potential_life_lost_rate),
+                        median_age_adjusted_death_rate= median(age_adjusted_death_rate),
+                        # Quality of Life
+                        median_percent_fair_or_poor_health= median(percent_fair_or_poor_health),
+                        median_percent_low_birthweight = median(percent_low_birthweight),
+                        median_average_number_of_physically_unhealthy_days= median(average_number_of_physically_unhealthy_days),
+                        median_percent_adults_with_diabetes= median(percent_adults_with_diabetes),
+                       median_num_hiv_cases = median(num_hiv_cases),
+                    # Health Behaviors
+                    median_percent_adults_with_obesity = median(percent_adults_with_obesity),
+                    median_food_environment_index = median(food_environment_index),
+                    median_num_food_insecure = median(num_food_insecure),
+                    median_percent_excessive_drinking = median(percent_excessive_drinking),
+                    #Clinical Care
+                    median_percent_uninsured = median(percent_uninsured),
+                    median_num_primary_care_physicians = median(num_primary_care_physicians),
+                    median_preventable_hospitalization_rate = median(preventable_hospitalization_rate),
+                    # socio econmic data as US CDC Social Vulnerability Index (SVI)
+                    median_percentile_rank_social_vulnerability = median(percentile_rank_social_vulnerability),
+                    # Socioeconomic
+                    median_percentile_rank_socioeconomic_theme = median(percentile_rank_socioeconomic_theme),
+                    median_percentile_rank_below_poverty = median(percentile_rank_below_poverty),
+                    median_percentile_rank_unemployed = median(percentile_rank_unemployed),
+                    median_percentile_rank_per_capita_income = median(percentile_rank_per_capita_income),
+                    median_percentile_rank_no_highschool_diploma= median(percentile_rank_no_highschool_diploma),
+                    # Household Composition & Disability
+                    median_percentile_rank_household_comp_disability_theme = median(percentile_rank_household_comp_disability_theme),
+                    median_percentile_rank_age_65_and_older = median(percentile_rank_age_65_and_older),
+                    median_percentile_rank_age_17_and_younger= median(percentile_rank_age_17_and_younger),
+                    median_percentile_rank_disabled= median(percentile_rank_disabled),
+                    median_percentile_rank_single_parent_households= median(percentile_rank_single_parent_households),
+                    # Minority Status & Language
+                    median_percentile_rank_minority_status_and_language_theme= median(percentile_rank_minority_status_and_language_theme),
+                    median_percentile_rank_minorities = median(percentile_rank_minorities),
+                    median_percentile_rank_limited_english_abilities = median(percentile_rank_limited_english_abilities),
+                    # Housing Type & Transportation
+                    median_percentile_rank_housing_and_transportation = median(percentile_rank_housing_and_transportation),
+                    median_percentile_percentile_rank_multi_unit_housing = median(percentile_rank_multi_unit_housing),
+                    median_percentile_rank_mobile_homes = median(percentile_rank_mobile_homes),
+                    median_percentile_rank_overcrowding = median(percentile_rank_overcrowding),
+                    median_percentile_rank_no_vehicle = median(percentile_rank_no_vehicle),
+                    median_percentile_rank_institutionalized_in_group_quarters = median(percentile_rank_institutionalized_in_group_quarters),
+                    ) %>%
+                as.data.frame()} else if (my_groups == "fips") {
+         data_aggregated <- data %>%
+                group_by(fips) %>% #aggegrate by target variable
+                dplyr::summarize(
+                    #ny times/covid-19-data
+                        #cases
+                        median_cases = median(cases),
+                        #ratiocases
+                        median_ratiocases  = median(ratiocases),
+                        #population
+                        median_total_population = median(total_population),
+                        #population_density_per_sqmi
+                        median_population_density = median(population_density_per_sqmi),
+                        #deaths
+                        median_deaths = median(deaths),
+                        # dataset from the Kaiser Family Foundation
+                        #stayhome in percentage
+                        mean_D_stay_at_home_effective = mean(D_stay_at_home_effective), #median variable not effective because it's an Dummy
+                        #stayhome duration
+                        median_days_stay_at_home_effective = median(days_stay_at_home_effective),
+                        #weather data 
+                        #temperature
+                        median_mean_temp = median(mean_temp),
+                        #dewpoint
+                        median_dewpoint= median(dewpoint),
+                        # health from www.countyhealthrankings.org. All data are extracted from 2019
+                        # Length of Life
+                        median_life_expectancy = median(life_expectancy),
+                        median_years_of_potential_life_lost_rate = median(years_of_potential_life_lost_rate),
+                        median_age_adjusted_death_rate= median(age_adjusted_death_rate),
+                        # Quality of Life
+                        median_percent_fair_or_poor_health= median(percent_fair_or_poor_health),
+                        median_percent_low_birthweight = median(percent_low_birthweight),
+                        median_average_number_of_physically_unhealthy_days= median(average_number_of_physically_unhealthy_days),
+                        median_percent_adults_with_diabetes= median(percent_adults_with_diabetes),
+                       median_num_hiv_cases = median(num_hiv_cases),
+                    # Health Behaviors
+                    median_percent_adults_with_obesity = median(percent_adults_with_obesity),
+                    median_food_environment_index = median(food_environment_index),
+                    median_num_food_insecure = median(num_food_insecure),
+                    median_percent_excessive_drinking = median(percent_excessive_drinking),
+                    #Clinical Care
+                    median_percent_uninsured = median(percent_uninsured),
+                    median_num_primary_care_physicians = median(num_primary_care_physicians),
+                    median_preventable_hospitalization_rate = median(preventable_hospitalization_rate),
+                    # socio econmic data as US CDC Social Vulnerability Index (SVI)
+                    median_percentile_rank_social_vulnerability = median(percentile_rank_social_vulnerability),
+                    # Socioeconomic
+                    median_percentile_rank_socioeconomic_theme = median(percentile_rank_socioeconomic_theme),
+                    median_percentile_rank_below_poverty = median(percentile_rank_below_poverty),
+                    median_percentile_rank_unemployed = median(percentile_rank_unemployed),
+                    median_percentile_rank_per_capita_income = median(percentile_rank_per_capita_income),
+                    median_percentile_rank_no_highschool_diploma= median(percentile_rank_no_highschool_diploma),
+                    # Household Composition & Disability
+                    median_percentile_rank_household_comp_disability_theme = median(percentile_rank_household_comp_disability_theme),
+                    median_percentile_rank_age_65_and_older = median(percentile_rank_age_65_and_older),
+                    median_percentile_rank_age_17_and_younger= median(percentile_rank_age_17_and_younger),
+                    median_percentile_rank_disabled= median(percentile_rank_disabled),
+                    median_percentile_rank_single_parent_households= median(percentile_rank_single_parent_households),
+                    # Minority Status & Language
+                    median_percentile_rank_minority_status_and_language_theme= median(percentile_rank_minority_status_and_language_theme),
+                    median_percentile_rank_minorities = median(percentile_rank_minorities),
+                    median_percentile_rank_limited_english_abilities = median(percentile_rank_limited_english_abilities),
+                    # Housing Type & Transportation
+                    median_percentile_rank_housing_and_transportation = median(percentile_rank_housing_and_transportation),
+                    median_percentile_percentile_rank_multi_unit_housing = median(percentile_rank_multi_unit_housing),
+                    median_percentile_rank_mobile_homes = median(percentile_rank_mobile_homes),
+                    median_percentile_rank_overcrowding = median(percentile_rank_overcrowding),
+                    median_percentile_rank_no_vehicle = median(percentile_rank_no_vehicle),
+                    median_percentile_rank_institutionalized_in_group_quarters = median(percentile_rank_institutionalized_in_group_quarters),
+                    ) %>%
+                as.data.frame()
+        return(data_aggregated)
+    } 
+    else 
+        {
+        return (-1)
+        }
+}
+
+# store aggregated dataset
+data_aggregated_state <-aggregate_data(dataset, "state")
+data_aggregated_county <-aggregate_data(dataset, "county")
+data_aggregated_fips <-aggregate_data(dataset, "fips")
+
+#export sampling-file as csv
+write.csv(
+        data_aggregated_state,
+        "C:\\Users\\Lenovo\\PycharmProjects\\DataAnalytics\\uebung2\\aggregated_state.csv", #specify here your path
+        row.names = FALSE)
+write.csv(
+        data_aggregated_county,
+        "C:\\Users\\Lenovo\\PycharmProjects\\DataAnalytics\\uebung2\\aggregated_county.csv", #specify here your path
+        row.names = FALSE)
+write.csv(
+        data_aggregated_fips,
+        "C:\\Users\\Lenovo\\PycharmProjects\\DataAnalytics\\uebung2\\aggregated_fips.csv", #specify here your path
+        row.names = FALSE)
+```
+Deskriptive Statistiken
+Gebe zunächst die grundlegenden Kennzahlen bzgl. deskriptive Statistiken wieder.
+```{r}
+#load cleaned dataset
+dataset <- read_csv("dataset.csv") #specify here your path
+#load cleaned dataset aggregated
+data_aggregated_state <- read_csv("aggregated_state.csv") #specify here your path
+data_aggregated_county <- read_csv("aggregated_county.csv") #specify here your path
+data_aggregated_fips <- read_csv("aggregated_fips.csv") #specify here your path
+```
+Betrachte die ersten fünf bzw. letzten fünf Zeilen
+```{r}
+top <- head(data_aggregated_state, n = 5L)
+top
+bottom <- tail(data_aggregated_state, n = 5L)
+bottom
+```
+Betrachte Struktur im Datensatz
+```{r}
+str(data_aggregated_state) #general information regarding data type and structure
+```
+Note: Es werden sich insgesamt 39 Staaten betrachtet, da durch den Cleaning Process die restlichen Staaten wegegfallen sind. Der Datensatz ist daher von NA bereinigt worden:
+
+```{r}
+skim(dataset)
+```
+
+```{r}
+data_aggregated_state %>% skim() %>% kable()
+```
+```{r}
+data_aggregated_county %>% skim() %>% kable()
+```
+```{r echo = FALSE, results= 'asis'}
+data_aggregated_fips %>% skim() %>% kable()
+```
+Betrachten wir uns die Korrelationen:
+```{r}
+# Extract all numeric columns
+data_aggregated_state_corr_columns <- data_aggregated_fips[,c(
+    "median_cases",                                             
+    "median_ratiocases",                                        
+    "median_total_population",                                  
+    "median_population_density",                                
+    "median_deaths",                                            
+    "mean_D_stay_at_home_effective",                            
+    "median_days_stay_at_home_effective",                       
+    "median_mean_temp",                                         
+    "median_dewpoint",                                          
+    "median_life_expectancy",                                   
+    "median_years_of_potential_life_lost_rate",                 
+    "median_age_adjusted_death_rate",                           
+    "median_percent_fair_or_poor_health",                       
+    "median_percent_low_birthweight",                           
+    "median_average_number_of_physically_unhealthy_days",       
+    "median_percent_adults_with_diabetes",                      
+    "median_num_hiv_cases",                                     
+    "median_percent_adults_with_obesity",                       
+    "median_food_environment_index",                            
+    "median_num_food_insecure",                                 
+    "median_percent_excessive_drinking",                        
+    "median_percent_uninsured",                                 
+    "median_num_primary_care_physicians",                       
+    "median_preventable_hospitalization_rate",                  
+    "median_percentile_rank_social_vulnerability",              
+    "median_percentile_rank_socioeconomic_theme",               
+    "median_percentile_rank_below_poverty",                     
+    "median_percentile_rank_unemployed",                        
+    "median_percentile_rank_per_capita_income",                 
+    "median_percentile_rank_no_highschool_diploma",             
+    "median_percentile_rank_household_comp_disability_theme",
+    "median_percentile_rank_age_65_and_older",                  
+    "median_percentile_rank_age_17_and_younger",                 
+    "median_percentile_rank_disabled",                           
+    "median_percentile_rank_single_parent_households",
+    "median_percentile_rank_minority_status_and_language_theme",
+    "median_percentile_rank_minorities",                        
+    "median_percentile_rank_limited_english_abilities",         
+    "median_percentile_rank_housing_and_transportation",
+    "median_percentile_percentile_rank_multi_unit_housing",
+    "median_percentile_rank_mobile_homes",
+    "median_percentile_rank_overcrowding",
+    "median_percentile_rank_no_vehicle",
+    "median_percentile_rank_institutionalized_in_group_quarters"
+)]
+data_aggregated_state_corr_columns
+```
+```{r}
+#todo provide dataframe with numeric values to calculate an correlation matrix
+data_aggregated_state_corr_data = cor(as.matrix(data_aggregated_state_corr_columns), method = c("spearman"))
+#generating correlation plots
+corrplot(data_aggregated_state_corr_data,
+         tl.cex = 0.55,
+         method = 'square', order = 'hclust',
+         addrect = 9, rect.col = 'blue', rect.lwd = 4
+)
+```
+- Social Distancing korreliert negativ mit den Coronafall-zahlen und der Infiziertenquote 
+- Beide Variablen zeigen verschiedene Korrelations-strukturen auf 
+- Features mit starken Korrelationen wirken sich womöglich auf die Performance von ML-Modellen aus
+```{r}
+Ratiocases <- data_aggregated_fips$median_ratiocases
+hist(Ratiocases,
+     col="darkmagenta",
+     breaks=30)
+```
+Es ist eine Normalverteilung zu erkennen, die leicht rechtsschief ist. 
+skew = 1.87 > 0
+Außerdem scheinen Außreißer in der Variable vorhanden zu sein
+kurtosis = 5.34 > 3
+```{r}
+describe(log(data_aggregated_fips$median_ratiocases))
+```
+EDA
+Wie sind die Coronafallzahlen innerhalb in den USA verteilt?
+```{r}
+plot_map <- function(data = dataset){
+        return(data %>%
+                       ggplot(aes(x=lon,y=lat,
+                                  color = cases)) + 
+                       geom_point(alpha = 0.2) + 
+                       scale_size(guide = "none") + 
+                       scale_color_viridis(option = "heat",
+                                           name = "COVID19 cases to date",
+                                           trans = "log",
+                                           limits = c(1,100000),
+                                           breaks = c(1,10,100,1000,10000,100000),
+                                           labels = format(c(1,10,100,1000,10000,100000),
+                                                           big.mark=",",scientific=FALSE)) + 
+                       labs(x="Longitude", y="Latitude") + 
+                       coord_equal() + 
+                       ggtitle("COVID19 cases by US county"))
+}
+plot_map()
+
+```
+Wie sieht das Wachstum der Coronafallzahlen für alle Staaten aus?
+```{r}
+print("Plotting outbreaks county-by-county")
+plotting_outbreaks <- function (min_cases, y_breaks, data = dataset){
+        return(
+                data %>%
+                        group_by(state) %>%
+                        filter(cases >= min_cases) %>%
+                        mutate(days_since_min_cases = as.numeric(date-min(date[cases >= min_cases]))) %>%
+                        ungroup() %>%
+                        ggplot(aes(x=days_since_min_cases, y=cases,
+                                   color = fips)) + 
+                        geom_line(alpha = 0.6) +
+                        xlab(sprintf("Days since %i cases", min_cases)) + 
+                        scale_y_log10(breaks = y_breaks,
+                                      labels = sprintf("%.0f",y_breaks)) + 
+                        theme(legend.position = "none") + 
+                        ggtitle("COVID19 cases by US states")
+        )
+}
+plotting_outbreaks(25, c(100,1000,10000,100000))
+```
+Welche Staaten besitzt die größte Bevölkerungen?
+
+```{r}
+states_ordered_by_cases <- data_aggregated_state[order(data_aggregated_state$median_cases, decreasing = TRUE),]
+states_ordered_by_cases[1:6,]
+```
+Diese sechs Staaten werden weiter untersucht. Dazu wird sich für einen Staat alle Fips betrachtet und unterschieden, ob Social Distancing aktiv bzw. inaktiv gewesen ist. Damit soll ein Einblick gewährt werden, inwiefern Social Distancing das Wachstum der Coronafallzahlen bremsen konnte.
+```{r}
+plot_stay_at_home_orders <- function(my_states, min_cases, y_breaks, data = dataset){
+        return(
+                data %>%
+                        filter(state %in% my_states) %>%
+                        filter(cases > min_cases) %>%
+                        ggplot(aes(x=date, y=cases,
+                                   color = stay_at_home_effective, group = fips)) + 
+                        geom_line(size=1, alpha  = 0.6) +
+                        scale_y_log10(breaks = y_breaks,
+                                      labels = sprintf("%.0f",y_breaks)) +
+                        scale_color_brewer(palette = "Set1", name = "Stay at home order in effect:") + 
+                        facet_wrap(~ state) + 
+                        theme(legend.position="bottom") + 
+                        ggtitle("COVID19 cases for the most populous states by fips")
+        )
+        
+}
+plot_stay_at_home_orders(c("North Carolina",
+                           "New Jersey",
+                           "Massachusetts",
+                           "Connecticut",
+                           "Arizona",
+                           "Delaware"
+                           ),
+                         25,
+                         c(100,1000,10000,100000))
+```
+Gibt es einen (negativen), linearen Zusammenhang zwischen den Coronafallzahlen und Social Distancing?
+```{r}
+plot_scatter_soc <- function(x1,y1,data = data_aggregated_state){
+        return(
+                data %>%
+                        group_by(state) %>%
+                        ggplot(aes(x=x1, y=y1)) + 
+                        geom_point() + 
+                        labs(x="Dauer der Tage mit Social Distancing in % gemessen", y =  "Fallzahlen in absoluten Zahlen") + 
+                        geom_smooth(method = "lm")  
+        )
+}
+
+plot_scatter_soc(
+        data_aggregated_state$mean_D_stay_at_home_effective,
+        data_aggregated_state$median_cases,
+        data_aggregated_state
+        )
+```
+Um den Datensatz weiter zu untersuchen, wird mit den ausgewählten Features verschiedene Modelle und Konstellationen trainiert. Dazu soll automl von h2o verwendet werden. 
+- Verschiedene Modelle und Konstellationen parallel zu trainieren bzw. optimieren mithilfe von H2O 
+- Auswahl des GBM mit bestem CV-Score
+- Vorhersagen für Trainings- und Testdaten
+- Untersuchung der Feature Importance auf FIPS-Ebene mithilfe von lime 
+```{r}
+library(tidyverse)
+library(readxl)
+library(h2o)
+library(lime)
+library(recipes)
+library(gridExtra) 
+library(vip)
+```
+```{r}
+# Pre-process Data Using Recipes
+covid_data <- data_aggregated_fips %>%
+  mutate_if(is.character, as.factor) %>%
+  select("median_ratiocases", everything())
+
+recipe_obj <- covid_data %>%
+  recipe(formula = median_ratiocases ~ .)  %>% #specify formula
+  step_rm(median_total_population, median_cases) %>% #remove column
+  step_zv(all_predictors())  %>% #remove columns
+  # step_center(all_numeric()) %>% #center data (0 mean)
+  # step_scale(all_numeric()) %>% #std = 1
+  prep(data = covid_data)
+
+covid_data <- bake(recipe_obj, new_data = covid_data)
+glimpse(covid_data)
+```
+```{r}
+# Start H2O Cluster and Create Train/Test Splits
+h2o.init() #specify maximum memory size
+```
+```{r}
+# Create Training and Test Sets
+set.seed(1234)
+
+covid_data_h2o <- as.h2o(covid_data)
+
+splits <- h2o.splitFrame(covid_data_h2o,
+                         c(0.7,0.15), #train and validation/test data
+                         seed =1234)
+
+train <- h2o.assign(splits[[1]], "train")
+valid <- h2o.assign(splits[[2]], "valid")
+test <- h2o.assign(splits[[2]], "test")
+```
+```{r}
+# Run AutoML to Train and Tune Models
+
+y <- "median_ratiocases"
+x <- setdiff(names(train), c(y,
+                             "median_percentile_rank_social_vulnerability",           
+                             "median_percentile_rank_socioeconomic_theme",
+                             "median_percentile_rank_household_comp_disability_theme",
+                            "median_percentile_rank_minority_status_and_language_theme",
+                            "median_percentile_rank_housing_and_transportation",
+                             "fips"))
+
+#Auto ML automatically trainss these models and uses a grid search and randomize grid search to find the optimal hyperparameter values 
+aml <- h2o.automl(x = x,
+                  y = y,
+                  training_frame = train,
+                  leaderboard_frame = valid, #data have to be checked against validation data
+                  max_runtime_secs = 7200,
+                  max_models = 30) # break after 180 seconds
+
+```
+Das Leaderboard mit den Modellen aus der Präsentation ist hier dokumentiert:
+AutoML Details
+==============
+Project Name: AutoML_1_20221211_165141 
+Leader Model ID: StackedEnsemble_AllModels_1_AutoML_1_20221211_165141 
+Algorithm: stackedensemble 
+
+Total Number of Models Trained: 32 
+Start Time: 2022-12-11 16:51:41 UTC 
+End Time: 2022-12-11 17:15:07 UTC 
+Duration: 1406 s
+
+Leaderboard
+===========
+                                                  model_id        rmse          mse         mae
+1     StackedEnsemble_AllModels_1_AutoML_1_20221211_165141 0.005410386 2.927227e-05 0.003442835
+2              GBM_grid_1_AutoML_1_20221211_165141_model_1 0.005478126 3.000987e-05 0.003614517
+3                           GBM_2_AutoML_1_20221211_165141 0.005478749 3.001669e-05 0.003615645
+4              GBM_grid_1_AutoML_1_20221211_165141_model_7 0.005495022 3.019527e-05 0.003584222
+5              GBM_grid_1_AutoML_1_20221211_165141_model_4 0.005537887 3.066819e-05 0.003611815
+6  StackedEnsemble_BestOfFamily_1_AutoML_1_20221211_165141 0.005550562 3.080874e-05 0.003575732
+7                           GBM_3_AutoML_1_20221211_165141 0.005628984 3.168546e-05 0.003641369
+8                           GBM_1_AutoML_1_20221211_165141 0.005669283 3.214077e-05 0.003819295
+9                           GBM_4_AutoML_1_20221211_165141 0.005677156 3.223009e-05 0.003711806
+10             GBM_grid_1_AutoML_1_20221211_165141_model_5 0.005681511 3.227956e-05 0.003854784
+         rmsle mean_residual_deviance
+1  0.005308369           2.927227e-05
+2  0.005376596           3.000987e-05
+3  0.005376745           3.001669e-05
+4  0.005393436           3.019527e-05
+5  0.005433144           3.066819e-05
+6  0.005446605           3.080874e-05
+7  0.005523213           3.168546e-05
+8  0.005566744           3.214077e-05
+9  0.005572202           3.223009e-05
+10 0.005578673           3.227956e-05
+```{r}
+#Leaderboard Exploration
+lb <- aml@leaderboard #get leaderboard results
+print(lb, n = nrow(lb)) #print entire result
+# bestm <- aml@leader #return the best model
+
+#extract an specific model 
+model_ids <-as.data.frame(aml@leaderboard$model_id)[,1] #extracting model_id colum as dta frame 
+best <- h2o.getModel(grep("GBM_grid_1_AutoML_1_20221211_165141_model_1", model_ids, value=TRUE)[1]) # grep function returns the match of an string 
+```
+Das Training wurde nach 32 Modellen beendet. Nun wird das beste Modell zu GBM ausgewählt. Zwar hat das Stack-Ensemble besser performt, aber diese Modelle waren nicht Teil der Veranstaltung zu Data Analytics. Die Details zu dem ausgewählten Modell sind hier dokumentiert.
+Model Details:
+==============
+
+H2ORegressionModel: gbm
+Model ID:  GBM_grid_1_AutoML_1_20221211_165141_model_1 
+Model Summary: 
+  number_of_trees number_of_internal_trees model_size_in_bytes min_depth max_depth mean_depth
+1              50                       50               25681         8        15   12.40000
+  min_leaves max_leaves mean_leaves
+1         30         40    35.88000
+
+
+H2ORegressionMetrics: gbm
+** Reported on training data. **
+
+MSE:  1.354419e-05
+RMSE:  0.003680243
+MAE:  0.002103579
+RMSLE:  0.003576779
+Mean Residual Deviance :  1.354419e-05
+
+
+
+H2ORegressionMetrics: gbm
+** Reported on cross-validation data. **
+** 5-fold cross-validation on training data (Metrics computed for combined holdout predictions) **
+
+MSE:  3.765315e-05
+RMSE:  0.006136216
+MAE:  0.00383269
+RMSLE:  0.005991167
+Mean Residual Deviance :  3.765315e-05
+
+
+Cross-Validation Metrics Summary: 
+                           mean       sd cv_1_valid cv_2_valid cv_3_valid cv_4_valid cv_5_valid
+mae                    0.003846 0.000355   0.003679   0.003650   0.003819   0.004466   0.003618
+mean_residual_deviance 0.000038 0.000009   0.000029   0.000034   0.000048   0.000048   0.000030
+mse                    0.000038 0.000009   0.000029   0.000034   0.000048   0.000048   0.000030
+r2                     0.564845 0.046473   0.639836   0.562255   0.511723   0.554476   0.555937
+residual_deviance      0.000038 0.000009   0.000029   0.000034   0.000048   0.000048   0.000030
+rmse                   0.006122 0.000759   0.005406   0.005865   0.006961   0.006901   0.005477
+rmsle                  0.005980 0.000721   0.005302   0.005729   0.006757   0.006742   0.005369
+```{r}
+# Model Performance Evaluation
+perf <- h2o.performance(best, newdata = test)
+# optimal_threshold <- h2o.find_threshold_by_max_metric(perf, "gbm") #specify the target metric 
+# metrics <- as.data.frame(h2o.metric(perf, optimal_threshold))
+# t(metrics)
+```
+H2ORegressionMetrics: gbm
+
+MSE:  3.000987e-05
+RMSE:  0.005478126
+MAE:  0.003614517
+RMSLE:  0.005376596
+Mean Residual Deviance :  3.000987e-05
+
+Lime versucht, aus komplexen Beziehungen eine lineare Interpreatation abzuleiten. Dies geschieht folgendermaßen: 
+- Daten permutieren
+- Berechnen des Abstands zwischen Permutationen und ursprünglichen Beobachtungen
+- Vorhersagen für neue Daten mit Hilfe eines komplexen Modells treffen
+- Auswahl von m Merkmalen, die das Ergebnis des komplexen Modells aus den permutierten Daten am besten beschreiben.
+- Anpassung eines einfachen Modells an die permutierten Daten mit m Merkmalen und Ähnlichkeitswerten als Gewichtung 
+- Die Merkmalsgewichte des einfachen Modells liefern Erklärungen für das lokale Verhalten des komplexen Modells.
+```{r}
+# Local Interpretable Model-Agnostic Explanations 
+
+#list contains best model and feature distrubutions of training data 
+# do not include the y variable here! Only want to pass in the distrubution or the values for the predictors 
+# no h2o object --> convert back to data frame
+explainer <- lime(
+  as.data.frame(train[, -43]),
+                best, #get rid of y-Columnm which is Column number 43
+                bin_continous = FALSE)
+
+explanation <- explain(as.data.frame(test[1:8, -43]), #pick samples in row, exclude y, variable in column
+                    explainer = explainer,
+                    kernel_width = 1, #width to convert simaltary metric
+                    n_features = 5, #number of features for each model
+                    n_labels = 1 #how many labels should be explained yes or no
+                    )
+                    
+plot_features(explanation)
+```
+Betrachten wir uns noch die Feature Importance im Allgemeinen:
+```{r}
+vip(best, num_features = 5) + ggtitle("Gradient Boosting: Feature importance")
+```
+Das Partialplot für Social Distancing. Eine mögliche Erklärung, um Regeln aus den Lime-Plots besser zu verstehen:
+```{r}
+h2o.partialPlot(best, data = train, cols = "median_days_stay_at_home_effective")
+```
+Generiere hier noch die Visualisierungen, wie gut das Modell auf den Trainingsdaten performt:
+```{r}
+prediction_train <- as.data.frame(h2o.predict(best, newdata = train))
+df_train <- as.data.frame(train[, "median_ratiocases"])
+df_train["prediction"] <- prediction_train
+
+ggplot(df_train, aes(x=prediction, y= median_ratiocases)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values for train data', y='train data ', title='Predicted vs. Actual Values')
+```
+```{r}
+# visualize the model, actual and predicted data
+count = 1:length(df_train$prediction)
+plot(count, df_train$median_ratiocases, col="blue", pch=20, cex=.9)
+lines(count, df_train$prediction, col="red", pch=20, cex=.9)
+```
+```{r}
+residuals_train = df_train$median_ratiocases - df_train$prediction
+RMSE_test = sqrt(mean(residuals_train^2))
+cat('The root mean square error of the train data is ', round(RMSE_test,3),'\n')
+y_train_mean = mean(df_train$median_ratiocases)
+# Calculate total sum of squares
+tss_train =  sum((df_train$median_ratiocases - y_train_mean)^2 )
+# Calculate residual sum of squares
+rss_train =  sum(residuals_train^2)
+# Calculate R-squared
+rsq_test  =  1 - (rss_train/tss_train)
+cat('The R-square of the train data is ', round(rsq_test,3), '\n')
+```
+Generiere hier noch die Visualisierungen, wie gut das Modell auf den Testdanten performt:
+```{r}
+prediction <- as.data.frame(h2o.predict(best, newdata = test))
+df_test <- as.data.frame(test[, "median_ratiocases"])
+df_test["prediction"] <- prediction
+
+ggplot(df_test, aes(x=prediction, y= median_ratiocases)) +
+  geom_point() +
+  geom_abline(intercept=0, slope=1) +
+  labs(x='Predicted Values for test data', y='test data ', title='Predicted vs. Actual Values')
+```
+```{r}
+# visualize the model, actual and predicted data
+count = 1:length(df_test$prediction)
+plot(count, df_test$median_ratiocases, col="blue", pch=20, cex=.9)
+lines(count, df_test$prediction, col="red", pch=20, cex=.9)
+
+```
+```{r}
+residuals_test = df_test$median_ratiocases - df_test$prediction
+RMSE_test = sqrt(mean(residuals_test^2))
+cat('The root mean square error of the test data is ', round(RMSE_test,3),'\n')
+y_test_mean = mean(df_test$median_ratiocases)
+# Calculate total sum of squares
+tss_test =  sum((df_test$median_ratiocases - y_test_mean)^2 )
+# Calculate residual sum of squares
+rss_test =  sum(residuals_test^2)
+# Calculate R-squared
+rsq_test  =  1 - (rss_test/tss_test)
+cat('The R-square of the test data is ', round(rsq_test,3), '\n')
+```
+Fazit:
+- Wir konnten mithilfe eines GBM einen großen Teil der Variation mit der 5-fold Kreuzvalidierung im aggregierten Datensatz erklären. (den anderen großen Teil leider nicht)
+- Wir konnten zeigen, dass spezielle Gruppen einen bedeutenden Anteil an der Infiziertenquote innehaben.
+- Wir konnten zeigen, dass pro FIPS der Einfluss der Features variieren kann. 
+```{r}
+print("Erkenntnis:")
+print("Maßnahmen zur Corona-Eindämmung wirken effizienter, wenn in den jeweiligen FIPS für bestimmte Gruppen spezifische Strategien (Testen, Impfpriorisierung, Stay at Home) entwickelt werden!")
+```
